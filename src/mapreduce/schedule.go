@@ -35,44 +35,33 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var start, end int = 0, ntasks - 1
 	wg.Add(ntasks)
-	for i := start; ; i = (i + 1) % ntasks{
-		wk := <- registerChan
-		mu.Lock()
+	for i := 0; i < ntasks; i++ {
+		go func(i int) {
+			for {
+				wk := <- registerChan
+				var args DoTaskArgs
+				args.JobName = jobName
+				if phase == mapPhase {
+					args.File = mapFiles[i]
+				}
+				args.Phase = phase
+				args.TaskNumber = i
+				args.NumOtherPhase = n_other
+				ok := call(wk, "Worker.DoTask", args, nil)
+				if !ok {
+					fmt.Printf("Call %v return false. " +
+						"This worker may crashed and thus cannot finish the task. " +
+						"The scheduler should tell other worker to do this task again.\n", i)
+				} else {
+					//debug("%v task return true.\n", i)
+					wg.Done()
+					registerChan <- wk
+					break
+				}
 
-		mu.Unlock()
-		go func(wk string, i int) {
-			var args DoTaskArgs
-			args.JobName = jobName
-			if phase == mapPhase {
-				args.File = mapFiles[i]
 			}
-			args.Phase = phase
-			args.TaskNumber = i
-			args.NumOtherPhase = n_other
-			ok := call(wk, "Worker.DoTask", args, nil)
-			if !ok {
-				fmt.Printf("Call %v return false. " +
-					"This worker may crashed and thus cannot finish the task. " +
-					"The scheduler should tell other worker to do this task again.\n", i)
-				mu.Lock()
-				end = (end + 1) % ntasks
-				mapFiles[end] = mapFiles[i]
-				mu.Unlock()
-			} else {
-				//debug("%v task return true.\n", i)
-				wg.Done()
-				registerChan <- wk
-			}
-		}(wk, i)
-		mu.Lock()
-		if i == end {
-			mu.Unlock()
-			break
-		}
-		mu.Unlock()
+		}(i)
 	}
 
 	wg.Wait()
