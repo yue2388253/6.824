@@ -35,9 +35,14 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 
 	var wg sync.WaitGroup
-	for i := 0; i < ntasks; i++{
+	var mu sync.Mutex
+	var start, end int = 0, ntasks - 1
+	wg.Add(ntasks)
+	for i := start; ; i = (i + 1) % ntasks{
 		wk := <- registerChan
-		wg.Add(1)
+		mu.Lock()
+
+		mu.Unlock()
 		go func(wk string, i int) {
 			var args DoTaskArgs
 			args.JobName = jobName
@@ -49,13 +54,25 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			args.NumOtherPhase = n_other
 			ok := call(wk, "Worker.DoTask", args, nil)
 			if !ok {
-				fmt.Printf("call return false.\n")
+				fmt.Printf("Call %v return false. " +
+					"This worker may crashed and thus cannot finish the task. " +
+					"The scheduler should tell other worker to do this task again.\n", i)
+				mu.Lock()
+				end = (end + 1) % ntasks
+				mapFiles[end] = mapFiles[i]
+				mu.Unlock()
 			} else {
 				//debug("%v task return true.\n", i)
 				wg.Done()
 				registerChan <- wk
 			}
 		}(wk, i)
+		mu.Lock()
+		if i == end {
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
 	}
 
 	wg.Wait()
