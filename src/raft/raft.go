@@ -55,7 +55,7 @@ type ApplyMsg struct {
 type LogEntry struct {
 	Term 	int
 	Index 	int
-	Content	string
+	Content	interface{}
 }
 
 //
@@ -101,6 +101,15 @@ type AppendEntryArgs struct {
 type AppendEntryReply struct {
 	Term			int
 	Success 		bool
+}
+
+func min(a, b int) (c int) {
+	if a > b {
+		c = b
+	} else {
+		c = a
+	}
+	return
 }
 
 // return currentTerm and whether this server
@@ -208,13 +217,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 
 	case args.Term == rf.currentTerm:
-		rf.state = STATE_FOLLOWER
-		if (rf.votedFor != -1) {
+		if rf.state == STATE_CANDIDATE {
+			// Two candidates are requesting votes at the same time.
 			reply.VoteGranted = false
+			reply.Term = rf.currentTerm
 			return
 		} else {
-			DPrintf("Strange, the candidate's(%v) term equal mine(%v). " +
-				"This candidate may be outdated.", args.CandidateId, rf.me)
+			DPrintf("This candidate may be outdated.")
+			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 			return
 		}
@@ -261,6 +271,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if rf.voteNum > len(rf.peers) / 2 {
 			if rf.state == STATE_CANDIDATE {
 				DPrintf("Candidate %v is voted to be the leader.\n", rf.me)
+				rf.votedFor = -1
 				rf.becomeLeader <- true
 			}
 		}
@@ -307,7 +318,8 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 	if args.PrevLogIndex >= len(rf.log) {
 		DPrintf("Follower %v received AppendEntry. PrevLogIndex > len(rf.log).", rf.me)
 		rf.heartbeat <- true
-		// TODO
+		// TODO: This follower is outdated.
+		reply.Success = false
 		return
 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("Follower %v found a conflicting entry.", rf.me)
@@ -317,9 +329,17 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 		return
 	} else {
 		// Find a match entry. Append new entries.
-		DPrintf("Follower %v Find a match entry.", rf.me)
+		DPrintf("Follower %v Find a match entry at index %v.", rf.me, args.PrevLogIndex)
 		rf.log = rf.log[: args.PrevLogIndex + 1]
 		rf.log = append(rf.log, args.Entries...)
+		DPrintf("Now my log is %v.", rf.log)
+		if args.LeaderCommit > rf.commitIndex {
+			newCommitIndex := min(args.LeaderCommit, len(rf.log) - 1)
+			for _, commitEntry := range rf.log[rf.commitIndex + 1: newCommitIndex + 1] {
+				rf.applyMsg <- ApplyMsg{true, commitEntry.Content, commitEntry.Index}
+			}
+			DPrintf("Update commitIndex, now is %v.", rf.commitIndex)
+		}
 		reply.Success = true
 		rf.heartbeat <- true
 		return
@@ -329,13 +349,43 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
 	// TODO: Do something to handle the reply
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if ok {
 		if reply.Success == false {
 			if reply.Term > rf.currentTerm {
-				rf.mu.Lock()
+				// This Leader might be outdated. Switch to be a follower.
 				rf.currentTerm = reply.Term
 				rf.state = STATE_FOLLOWER
-				rf.mu.Unlock()
+			} else {
+				// TODO: The follower may be outdated. Decrease nextIndex[i] and so on.
+			}
+		} else {
+			if len(args.Entries) != 0 {
+				// The follower has received the entries and appended them.
+				rf.nextIndex[server] += len(args.Entries)
+				newMatchIndex := rf.matchIndex[server] + len(args.Entries)
+				if rf.matchIndex[server] <= rf.commitIndex && newMatchIndex > rf.commitIndex {
+					count := 0
+					newCommitIndex := newMatchIndex
+					for _, matchIndex := range rf.matchIndex {
+						if matchIndex > rf.commitIndex {
+							count++
+							if matchIndex < newCommitIndex {
+								newCommitIndex = matchIndex
+							}
+							if count > len(rf.peers) / 2 {
+								for _, commitEntry := range rf.log[rf.commitIndex + 1: newCommitIndex + 1] {
+									rf.applyMsg <- ApplyMsg{true, commitEntry.Content, commitEntry.Index}
+									DPrintf("send msg %v to applyMsg.", commitEntry)
+								}
+								DPrintf("================Leader update commitIndex.")
+								rf.commitIndex = newCommitIndex
+							}
+						}
+					}
+				}
+				rf.matchIndex[server] = newMatchIndex
 			}
 		}
 	}
@@ -394,10 +444,22 @@ func (rf *Raft) startNewElection() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader := (rf.state == STATE_LEADER)
+	if isLeader == false {
+		return index, term, isLeader
+	}
 
 	// Your code here (2B).
-
+	index = len(rf.log)
+	term = rf.currentTerm
+	logEntry := LogEntry{
+		Term:		term,
+		Index:		index,
+		Content:	command,
+	}
+	rf.log = append(rf.log, logEntry)
 
 	return index, term, isLeader
 }
@@ -454,13 +516,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.state = STATE_CANDIDATE
 					rf.voteNum = 1
 					rf.currentTerm++
+					rf.votedFor = rf.me
 					rf.mu.Unlock()
 					rf.broadcastRequestVote()
 
 				case <- rf.heartbeat:
 					// Do nothing
-					DPrintf("Follower %v reset the election timeout.", rf.me)
-
 				}
 
 			case STATE_CANDIDATE:
@@ -479,6 +540,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.mu.Lock()
 					rf.voteNum = 1
 					rf.currentTerm++
+					rf.votedFor = rf.me
 					rf.mu.Unlock()
 					rf.broadcastRequestVote()
 					// Start a new election term
