@@ -18,13 +18,24 @@ package raft
 //
 
 import "sync"
-import "labrpc"
+import (
+	"labrpc"
+	"time"
+	"math/rand"
+	"fmt"
+)
 
 // import "bytes"
 // import "labgob"
 
 
-
+const (
+	STATE_LEADER 	= 0
+	STATE_CANDIDATE = 1
+	STATE_FOLLOWER 	= 2
+	ELECT_TIMEOUT	= 300 * time.Millisecond	// Election timeout(ms) (will plus a randomized value)
+	HB_INTERVAL		= 150 * time.Millisecond	// Heartbeat interval(ms)
+)
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -42,19 +53,55 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type LogEntry struct {
+	Term 	int
+	Index 	int
+	Content	string
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+	mu       		sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     		[]*labrpc.ClientEnd // RPC end points of all peers
+	persister 		*Persister          // Object to hold this peer's persisted state
+	me        		int                 // this peer's index into peers[]
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	state			int
 
+	currentTerm 	int
+	votedFor 		int
+	log				[]LogEntry
+
+	commitIndex		int
+	lastApplied		int
+
+	nextIndex		[]int
+	matchIndex 		[]int
+
+	voteNum			int
+	heartbeat		chan bool
+	grantVoted		chan bool
+	becomeLeader	chan bool
+
+}
+
+type AppendEntryArgs struct {
+	Term			int
+	LeaderId		int
+	PrevLogIndex	int
+	PrevLogTerm		int
+	Entries			[]LogEntry
+	LeaderCommit	int
+}
+
+type AppendEntryReply struct {
+	Term			int
+	Success 		bool
 }
 
 // return currentTerm and whether this server
@@ -109,13 +156,16 @@ func (rf *Raft) readPersist(data []byte) {
 
 
 
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term 			int
+	CandidateId 	int
+	LastLogIndex 	int
+	LastLogTerm 	int
 }
 
 //
@@ -124,6 +174,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term 			int
+	VoteGranted 	bool
 }
 
 //
@@ -167,6 +219,32 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) broadcastRequestVote() {
+	for peer := range rf.peers {
+		go func() {
+			var args RequestVoteArgs
+			var reply RequestVoteReply
+			ok := rf.sendRequestVote(peer, &args, &reply)
+			if !ok {
+				fmt.Printf("sendRequestVote failed.")
+			}
+			if reply.VoteGranted {
+				rf.grantVoted <- true
+			}
+		}()
+	}
+}
+
+func (rf *Raft) broadcastAppendEntries() {
+
+}
+
+func (rf *Raft) startNewElection() {
+	rf.mu.Lock()
+	rf.currentTerm++
+	rf.mu.Unlock()
+	rf.broadcastRequestVote()
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -222,6 +300,57 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.state = STATE_FOLLOWER
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	go func() {
+		for {
+			switch rf.state {
+			case STATE_FOLLOWER:
+				select {
+				case time.After(ELECT_TIMEOUT + time.Duration(rand.Int63() % 300)):
+					// Hear no heartbeat
+					rf.mu.Lock()
+					rf.state = STATE_CANDIDATE
+					rf.mu.Unlock()
+					rf.broadcastRequestVote()
+
+				case <- rf.heartbeat:
+					// Do nothing
+
+				}
+
+			case STATE_CANDIDATE:
+				select {
+				case <- rf.becomeLeader:
+					rf.mu.Lock()
+					rf.state = STATE_LEADER
+					rf.mu.Unlock()
+					rf.broadcastAppendEntries()
+
+				case time.After(ELECT_TIMEOUT + time.Duration(rand.Int63() % 300)):
+					rf.mu.Lock()
+					rf.voteNum = 0
+					rf.mu.Unlock()
+					// Start a new election term
+
+				case <- rf.heartbeat:
+					rf.mu.Lock()
+					rf.state = STATE_FOLLOWER
+					rf.mu.Unlock()
+
+				}
+
+			case STATE_LEADER:
+				// How can a leader know it is outdated and thus become a follower
+				time.Sleep(HB_INTERVAL)
+				rf.broadcastAppendEntries()
+			}
+		}
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
