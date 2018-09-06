@@ -86,6 +86,7 @@ type Raft struct {
 	heartbeat		chan bool
 	becomeLeader	chan bool
 	becomeFollower	chan bool
+	becomeCandidate	chan bool
 	applyMsg		chan ApplyMsg
 
 }
@@ -203,13 +204,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	//DPrintf("Server %v received RequestVote from Candidate %v.\n", rf.me, args.CandidateId)
 	switch {
-	case rf.state != STATE_FOLLOWER || args.Term < rf.currentTerm || args.LastLogIndex < rf.commitIndex:
+	case args.Term < rf.currentTerm || args.LastLogIndex < rf.commitIndex:
+		DPrintf("Follower %v rejected Candidate %v. " +
+			"State: %v, args.Term: %v, currentTerm: %v, args.LastLogIndex: %v, " +
+			"commitIndex: %v.",
+			rf.me, args.CandidateId, rf.state, args.Term, rf.currentTerm,
+			args.LastLogIndex, rf.commitIndex)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
 
 	case args.Term > rf.currentTerm:
-		rf.state = STATE_FOLLOWER
+		if rf.state != STATE_FOLLOWER {
+			rf.becomeFollower <- true
+		}
 		DPrintf("Follower %v voted Candidate %v.", rf.me, args.CandidateId)
 		rf.currentTerm = args.Term
 		reply.VoteGranted = true
@@ -217,18 +225,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.heartbeat <- true
 		return
 
+	case rf.state != STATE_FOLLOWER:
+		// This case is a spilt votes.
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+
 	case args.Term == rf.currentTerm:
-		if rf.state == STATE_CANDIDATE {
-			// Two candidates are requesting votes at the same time.
-			reply.VoteGranted = false
-			reply.Term = rf.currentTerm
-			return
-		} else {
-			DPrintf("This candidate may be outdated.")
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = false
-			return
-		}
+		DPrintf("This candidate may be outdated.")
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
 
 	}
 }
@@ -311,6 +318,14 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
+		DPrintf("Leader %v is outdated. Because ", args.LeaderId)
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		rf.becomeCandidate <- true
+		return
+	}
+
+	if args.LeaderCommit < rf.commitIndex {
 		DPrintf("Leader %v is outdated.", args.LeaderId)
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -354,7 +369,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 
 func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
-	// TODO: Do something to handle the reply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if ok {
@@ -373,16 +387,18 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 		} else {
 			if len(args.Entries) != 0 {
 				// The follower has received the entries and appended them.
-				//DPrintf("1")
 				rf.nextIndex[server] += len(args.Entries)
 				newMatchIndex := rf.matchIndex[server] + len(args.Entries)
+				//DPrintf("matchIndex[%v]: %v\tlen:%v\tnewMatchIndex:%v\trf.commitIndex:%v.",
+				//	server, rf.matchIndex[server], len(args.Entries), newMatchIndex, rf.commitIndex)
 				if rf.matchIndex[server] <= rf.commitIndex && newMatchIndex > rf.commitIndex {
 					//DPrintf("2")
 					count := 1			// From the server
 					newCommitIndex := newMatchIndex
 					for _, matchIndex := range rf.matchIndex {
 						if matchIndex > rf.commitIndex {
-							//DPrintf("Found a higher matchIndex. Server is %v.", i)
+							//DPrintf("After send AppendEntry to %v, " +
+							//	"leader %v found a higher matchIndex.", server, rf.me)
 							count++
 							if matchIndex < newCommitIndex {
 								newCommitIndex = matchIndex
@@ -430,7 +446,7 @@ func (rf *Raft) broadcastAppendEntries() {
 			rf.mu.Unlock()
 			ok := rf.sendAppendEntry(server, &args, &reply)
 			if !ok {
-				DPrintf("sendAppendEntry to %v failed.", server)
+				DPrintf("Leader %v sendAppendEntry to %v failed.", rf.me, server)
 			}
 			// Do something to handle the reply
 		}(i)
@@ -525,6 +541,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeat = make(chan bool, 100)
 	rf.becomeLeader = make(chan bool, 1)
 	rf.becomeFollower = make(chan bool, 1)
+	rf.becomeCandidate= make(chan bool, 1)
 	rf.applyMsg = applyCh
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
@@ -540,6 +557,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 				case <- rf.heartbeat:
 					// Do nothing
+
+				case <- rf.becomeCandidate:
+					rf.startNewElection()
+
 				}
 
 			case STATE_CANDIDATE:
@@ -560,6 +581,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.startNewElection()
 
 				case <- rf.heartbeat:
+					rf.mu.Lock()
+					rf.state = STATE_FOLLOWER
+					rf.mu.Unlock()
+
+				case <- rf.becomeFollower:
 					rf.mu.Lock()
 					rf.state = STATE_FOLLOWER
 					rf.mu.Unlock()
