@@ -747,6 +747,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				leader = i
 			}
 		}
+		DPrintf("===iter: %v\tnup: %v", iters, nup)
 
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
@@ -775,6 +776,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
+	DPrintf("END FOR")
 
 	cfg.one(rand.Int()%10000, servers, true)
 
