@@ -239,6 +239,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	//DPrintf("Server %v received RequestVote from Candidate %v.\n", rf.me, args.CandidateId)
 	if args.Term < rf.currentTerm {
@@ -258,8 +259,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		rf.state = STATE_FOLLOWER
 		rf.votedFor = -1
 	}
+	reply.Term = rf.currentTerm
 
 	if upToDate && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		if rf.state != STATE_FOLLOWER {
@@ -314,8 +317,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if reply.VoteGranted {
 		//DPrintf("Candidate %v get a vote from %v.", rf.me, server)
 		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if rf.state != STATE_CANDIDATE {
-			rf.mu.Unlock()
 			return ok
 		}
 		rf.voteNum++
@@ -323,7 +326,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			DPrintf("Candidate %v is voted to be the leader.\n", rf.me)
 			rf.becomeLeader <- true
 		}
-		rf.mu.Unlock()
 	}
 	return ok
 }
@@ -331,24 +333,28 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) broadcastRequestVote() {
 	DPrintf("Candidate %v is broadcasting RequestVote. Current term: %v.",
 		rf.me, rf.currentTerm)
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
-		go func(server int) {
-			var args RequestVoteArgs
-			var reply RequestVoteReply
-			rf.mu.Lock()
-			args.Term = rf.currentTerm
-			args.CandidateId = rf.me
-			args.LastLogIndex = len(rf.log) - 1
-			args.LastLogTerm = rf.log[len(rf.log) - 1].Term
-			rf.mu.Unlock()
+
+		var args RequestVoteArgs
+		var reply RequestVoteReply
+		args.Term = rf.currentTerm
+		args.CandidateId = rf.me
+		args.LastLogIndex = len(rf.log) - 1
+		args.LastLogTerm = rf.log[len(rf.log) - 1].Term
+
+
+		go func(server int, args RequestVoteArgs, reply RequestVoteReply) {
 			ok := rf.sendRequestVote(server, &args, &reply)
 			if !ok {
 				DPrintf("Candidate %v sendRequestVote to %v failed.", rf.me, server)
 			}
-		}(i)
+		}(i, args, reply)
 	}
 }
 
@@ -364,10 +370,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 			rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		reply.Success = false
 		reply.Term = rf.currentTerm
-		//if rf.state == STATE_FOLLOWER {
-		//	DPrintf("Follower %v transform to be a Candidate.", rf.me)
-		//	rf.becomeCandidate <- true
-		//}
 		return
 	}
 
@@ -487,10 +489,11 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 }
 
 func (rf *Raft) broadcastAppendEntries() {
-	DPrintf("Leader %v is broadcasting AppendEntries.", rf.me)
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	DPrintf("Leader %v is broadcasting AppendEntries. CurrentTerm: %v",
+		rf.me, rf.currentTerm)
 	//newLastApplied := rf.lastApplied
 	if rf.commitIndex > rf.lastApplied {
 		DPrintf("There might be some logs for Leader %v to be applied.", rf.me)
