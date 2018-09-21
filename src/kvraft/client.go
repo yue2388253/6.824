@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+const RQSTINTERVAL = 500 * time.Millisecond
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -50,26 +51,20 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	DPrintf("==============ck's Get(key: %v)", key)
 	args := GetArgs{Key: key}
-	isDone := false
-	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for i, _ := range ck.servers {
+	num := len(ck.servers)
+	for i := range ck.servers {
 		wg.Add(1)
-		go func(args GetArgs, i int) {
+		go func(args GetArgs, i int, others int) {
 			defer wg.Done()
 			for {
-				mu.Lock()
-				if isDone {
-					mu.Unlock()
-					DPrintf("ck goroutine %v break from for.", i)
-					break
-				}
-				mu.Unlock()
 				var reply GetReply
 				ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 				if ok {
 					if reply.Err == OK {
-						ck.doneChan <- true
+						for j := 0; j < others; j++ {
+							ck.doneChan <- true
+						}
 						ck.valueChan <- reply.Value
 						DPrintf("==========ck successfully get key(%v), value: %v.",
 							key, reply.Value)
@@ -80,18 +75,19 @@ func (ck *Clerk) Get(key string) string {
 				} else {
 					DPrintf("Failed to call.")
 				}
+
+				select {
+				case <- ck.doneChan:
+					return
+				case <- time.After(RQSTINTERVAL):
+					continue
+				}
 			}
-		}(args, i)
+		}(args, i, num)
 	}
 
-	// TODO: This may receive signal from other operation.
-	ok := <- ck.doneChan
-	if ok {
-		ck.mu.Lock()
-		isDone = true
-		ck.mu.Unlock()
-		DPrintf("ck get true from chanDone.")
-	}
+	// Note: This may receive signal from other operation.
+	<- ck.doneChan
 	value := <- ck.valueChan
 	DPrintf("=========ck get value(%v) from valueChan.", value)
 
@@ -119,51 +115,44 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Value:	value,
 		Op: 	op,
 	}
-	isDone := false
-	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for i, _ := range ck.servers {
+	num := len(ck.servers)
+	for i := range ck.servers {
 		wg.Add(1)
-		go func(args PutAppendArgs, i int) {
+		go func(args PutAppendArgs, i int, others int) {
 			defer wg.Done()
 			for {
-				mu.Lock()
-				if isDone {
-					mu.Unlock()
-					DPrintf("ck goroutine %v Break from for.", i)
-					return
-				}
-				mu.Unlock()
 				var reply PutAppendReply
 				ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 				if ok {
 					if reply.Err == OK {
+						for j := 0; j < others; j++ {
+							ck.doneChan <- true
+						}
 						DPrintf("=======ck's PutApppend got success from kv[%v].", i)
-						ck.doneChan <- true
-						return
+						break
 					} else {
 						//DPrintf("Not OK.")
 					}
 				} else {
 					DPrintf("Failed to call.")
 				}
-				time.Sleep(150 * time.Millisecond)
+
+				select {
+				case <- ck.doneChan:
+					DPrintf("This request has been finished by other servers.")
+					return
+				case <- time.After(RQSTINTERVAL):
+					continue
+				}
 			}
-		}(args, i)
+		}(args, i, num)
 	}
 
-	ok := <- ck.doneChan
-	if ok {
-		ck.mu.Lock()
-		isDone = true
-		ck.mu.Unlock()
-		DPrintf("ck get true from chanDone.")
-	}
-
+	<- ck.doneChan
 	wg.Wait()
 	DPrintf("=============Return from ck's PutAppend.")
 	return
-
 }
 
 func (ck *Clerk) Put(key string, value string) {

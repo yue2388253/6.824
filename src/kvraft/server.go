@@ -63,8 +63,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	index, _, isLeader := kv.rf.Start(oper)
 
 	if !isLeader {
-		// DPrintf("I am not a leader.")
-		// DPrintf("Server[%v]'s PutAppend return false.", kv.me)
+		//DPrintf("Server[%v]'s Get return false.", kv.me)
 		return
 	}
 
@@ -111,13 +110,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Key:		args.Key,
 		Value: 		args.Value,
 	}
-	//DPrintf("+%v", kv.me)
 	index, _, isLeader := kv.rf.Start(oper)
-	//DPrintf("=%v", kv.me)
 
 	if !isLeader {
-		DPrintf("kv[%v] is not the leader.", kv.me)
-		// DPrintf("Server[%v]'s PutAppend return false.", kv.me)
+		//DPrintf("Server[%v]'s PutAppend return false.", kv.me)
 		return
 	}
 
@@ -194,15 +190,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	go func() {
 		for {
-			//kv.isRqst.mu.Lock()
-			//kv.isRqst.mu.Unlock()
-			//kv.isRqst.mu.Lock()
-			//for kv.isRqst.isRqst {
-			//	kv.isRqst.cond.Wait()
-			//}
-			//kv.isRqst.mu.Unlock()
-
-			// TODO: determine whether the received msg is the reply of the request.
 			select {
 			case cmd := <- kv.applyCh:
 				kv.mu.Lock()
@@ -225,6 +212,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 						kv.keyValues[op.Key] = op.Value
 						DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
 					}
+
+					// determine whether the received msg is the reply of the request.
 					kv.rqst.mu.Lock()
 					if cmd.CommandIndex == kv.rqst.currentRqstIndex {
 						DPrintf("Finished msg")
@@ -232,6 +221,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 						kv.rqst.cond.Signal()
 					}
 					kv.rqst.mu.Unlock()
+
 				} else {
 					panic(ok)
 				}
