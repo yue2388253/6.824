@@ -2,12 +2,20 @@ package raftkv
 
 import "labrpc"
 import "crypto/rand"
-import "math/big"
+import (
+	"math/big"
+	"sync"
+	"time"
+)
 
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu		sync.Mutex
+	doneChan	chan bool
+	valueChan	chan string
+	isDone		bool
 }
 
 func nrand() int64 {
@@ -21,6 +29,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.doneChan = make(chan bool)
+	ck.valueChan = make(chan string)
 	return ck
 }
 
@@ -37,9 +47,57 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	DPrintf("==============ck's Get(key: %v)", key)
+	args := GetArgs{Key: key}
+	isDone := false
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i, _ := range ck.servers {
+		wg.Add(1)
+		go func(args GetArgs, i int) {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				if isDone {
+					mu.Unlock()
+					DPrintf("ck goroutine %v break from for.", i)
+					break
+				}
+				mu.Unlock()
+				var reply GetReply
+				ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+				if ok {
+					if reply.Err == OK {
+						ck.doneChan <- true
+						ck.valueChan <- reply.Value
+						DPrintf("==========ck successfully get key(%v), value: %v.",
+							key, reply.Value)
+						break
+					} else {
+						//DPrintf("Not OK.")
+					}
+				} else {
+					DPrintf("Failed to call.")
+				}
+			}
+		}(args, i)
+	}
+
+	// TODO: This may receive signal from other operation.
+	ok := <- ck.doneChan
+	if ok {
+		ck.mu.Lock()
+		isDone = true
+		ck.mu.Unlock()
+		DPrintf("ck get true from chanDone.")
+	}
+	value := <- ck.valueChan
+	DPrintf("=========ck get value(%v) from valueChan.", value)
+
+	wg.Wait()
+	DPrintf("=============Return from ck's Get.")
+	return value
 }
 
 //
@@ -54,6 +112,58 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	DPrintf("========ck's PutAppend(key: %v, value: %v, op: %v)==========.",
+		key, value, op)
+	args := PutAppendArgs{
+		Key:	key,
+		Value:	value,
+		Op: 	op,
+	}
+	isDone := false
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i, _ := range ck.servers {
+		wg.Add(1)
+		go func(args PutAppendArgs, i int) {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				if isDone {
+					mu.Unlock()
+					DPrintf("ck goroutine %v Break from for.", i)
+					return
+				}
+				mu.Unlock()
+				var reply PutAppendReply
+				ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+				if ok {
+					if reply.Err == OK {
+						DPrintf("=======ck's PutApppend got success from kv[%v].", i)
+						ck.doneChan <- true
+						return
+					} else {
+						//DPrintf("Not OK.")
+					}
+				} else {
+					DPrintf("Failed to call.")
+				}
+				time.Sleep(150 * time.Millisecond)
+			}
+		}(args, i)
+	}
+
+	ok := <- ck.doneChan
+	if ok {
+		ck.mu.Lock()
+		isDone = true
+		ck.mu.Unlock()
+		DPrintf("ck get true from chanDone.")
+	}
+
+	wg.Wait()
+	DPrintf("=============Return from ck's PutAppend.")
+	return
+
 }
 
 func (ck *Clerk) Put(key string, value string) {

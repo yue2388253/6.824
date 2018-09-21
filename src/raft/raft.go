@@ -254,7 +254,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.LastLogTerm > rf.GetLastTerm() ||
 		(args.LastLogTerm == rf.GetLastTerm() && args.LastLogIndex >= rf.GetLastIndex()){
 			upToDate = true
-			DPrintf("Candidate's log is more up-to-date.")
+			//DPrintf("Candidate's log is more up-to-date.")
 	}
 
 	if args.Term > rf.currentTerm {
@@ -362,7 +362,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//DPrintf("Server %v received AppendEntry from %v.", rf.me, args.LeaderId)
+	DPrintf("Server %v received AppendEntry from %v.", rf.me, args.LeaderId)
 
 	if args.Term < rf.currentTerm {
 		DPrintf("Server %v received AppendEntry. Leader %v is outdated. " +
@@ -639,6 +639,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func() {
 		for {
 			switch rf.state {
+			// TODO: remove some unnecessary codes such as rf.becomeFollower
 			case STATE_FOLLOWER:
 				select {
 				case <- time.After(ELECT_TIMEOUT + time.Duration(rand.Int63() % 300) * time.Millisecond):

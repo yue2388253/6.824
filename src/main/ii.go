@@ -13,7 +13,7 @@ import (
 // The mapping function is called once for each piece of the input.
 // In this framework, the key is the name of the file that is being processed,
 // and the value is the file's contents. The return value should be a slice of
-// key/value pairs, each represented by a mapreduce.KeyValue.
+// key/value pairs, each represented by a mapreduce.keyValues.
 func mapF(document string, value string) (res []mapreduce.KeyValue) {
 	// Your code here (Part V).
 	// Your code here (Part V).

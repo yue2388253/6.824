@@ -31,7 +31,7 @@ func doMap(
 	// typically ignores it. The second argument should be the entire
 	// input file contents. mapF() returns a slice containing the
 	// key/value pairs for reduce; see common.go for the definition of
-	// KeyValue.
+	// keyValues.
 	//
 	// Look at Go's ioutil and os packages for functions to read
 	// and write files.

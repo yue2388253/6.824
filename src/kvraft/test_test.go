@@ -171,7 +171,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	} else {
 		title = title + "one client"
 	}
-	title = title + " (" + part + ")" // 3A or 3B
+	title = title + " (" + part + ")" // 3A or 3Bgoga
 
 	const nservers = 5
 	cfg := make_config(t, nservers, unreliable, maxraftstate)

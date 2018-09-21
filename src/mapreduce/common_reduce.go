@@ -37,7 +37,7 @@ func doReduce(
 	// call it once per distinct key, with a slice of all the values
 	// for that key. reduceF() returns the reduced value for that key.
 	//
-	// You should write the reduce output as JSON encoded KeyValue
+	// You should write the reduce output as JSON encoded keyValues
 	// objects to the file named outFile. We require you to use JSON
 	// because that is what the merger than combines the output
 	// from all the reduce tasks expects. There is nothing special about
@@ -46,7 +46,7 @@ func doReduce(
 	//
 	// enc := json.NewEncoder(file)
 	// for key := ... {
-	// 	enc.Encode(KeyValue{key, reduceF(...)})
+	// 	enc.Encode(keyValues{key, reduceF(...)})
 	// }
 	// file.Close()
 	//
