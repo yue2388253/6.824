@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 1
@@ -17,7 +18,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -25,13 +25,16 @@ type Op struct {
 	Operation	string
 	Key			string
 	Value		string
+	Id			int64
+	ReqId		int
 }
 
 type Rqst struct {
 	mu					sync.Mutex
-	cond				*sync.Cond
 	currentRqstIndex	int
-	isDone				bool
+	oper 				Op
+	//isDone				bool
+	ch					chan bool
 }
 
 type KVServer struct {
@@ -45,61 +48,81 @@ type KVServer struct {
 	// Your definitions here.
 	keyValues	map[string]string
 	rqst		Rqst
+	chanRqst	chan Op
+	chanDone	chan bool
+	chanFinished	chan bool
+	ack			map[int64]int
 
 }
 
+// Return true if this op is duplicated.
+func (kv *KVServer) CheckDup(op Op) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	id := op.Id
+	reqId := op.ReqId
+	v, ok := kv.ack[id]
+	if ok {
+		return v >= reqId
+	}
+	return false
+}
+
+func (kv *KVServer) AppendEntryToLog(oper Op) bool {
+	if _, leader := kv.rf.GetState(); leader {
+		DPrintf("============kv[%v] is the leader.", kv.me)
+		kv.chanRqst <- oper
+		return true
+	} else {
+		return false
+	}
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	DPrintf("kv[%v].Get(args: %v)", kv.me, args)
 
-	reply.WrongLeader = true
-	reply.Err = ErrNoKey
-
 	oper := Op{
-		Operation:	OPER_GET,
-		Key:		args.Key,
+		Operation: 	OperGet,
+		Key:       	args.Key,
+		Id:			args.Id,
+		ReqId: 		args.ReqId,
 	}
-	index, _, isLeader := kv.rf.Start(oper)
 
-	if !isLeader {
-		//DPrintf("Server[%v]'s Get return false.", kv.me)
+	if !kv.AppendEntryToLog(oper) {
+		reply.WrongLeader = true
+		reply.Err = ErrNoKey
 		return
 	}
 
-	DPrintf("============kv[%v] is the leader.", kv.me)
-
-	kv.rqst.mu.Lock()
-	kv.rqst.currentRqstIndex = index
-	kv.rqst.isDone = false
-	kv.rqst.mu.Unlock()
 	defer func() {
 		kv.rqst.mu.Lock()
-		kv.rqst.isDone = false
 		kv.rqst.currentRqstIndex = -1
 		kv.rqst.mu.Unlock()
+		kv.chanFinished <- true
 	}()
 
-	kv.rqst.mu.Lock()
-	for !kv.rqst.isDone {
-		kv.rqst.cond.Wait()
-	}
-	kv.rqst.mu.Unlock()
-
-	reply.WrongLeader = false
-	reply.Err = OK
-	if value, ok := kv.keyValues[args.Key]; ok {
-		reply.Value = value
-		return
+	if ok := <- kv.chanDone; ok {
+		reply.WrongLeader = false
+		reply.Err = OK
+		if value, ok := kv.keyValues[args.Key]; ok {
+			reply.Value = value
+			DPrintf("============Return OK.")
+			return
+		} else {
+			reply.Err = ErrNoKey
+			DPrintf("Error: No key.")
+			return
+		}
 	} else {
-		reply.Err = ErrNoKey
+		reply.WrongLeader = false
+		reply.Err = ErrTimeOut
 		return
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	// TODO: add a locker or a queue so that a server can only handle one request at a time.
 	DPrintf("kv[%v].PutAppend(args: %v)", kv.me, args)
 
 	reply.WrongLeader = true
@@ -109,38 +132,52 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Operation:	args.Op,
 		Key:		args.Key,
 		Value: 		args.Value,
+		Id:			args.Id,
+		ReqId: 		args.ReqId,
 	}
-	index, _, isLeader := kv.rf.Start(oper)
 
-	if !isLeader {
-		//DPrintf("Server[%v]'s PutAppend return false.", kv.me)
+	if !kv.AppendEntryToLog(oper) {
+		reply.WrongLeader = true
+		reply.Err = ErrNoKey
 		return
 	}
 
-	DPrintf("============kv[%v] is the leader.", kv.me)
-
-	kv.rqst.mu.Lock()
-	kv.rqst.currentRqstIndex = index
-	kv.rqst.isDone = false
-	kv.rqst.mu.Unlock()
 	defer func() {
 		kv.rqst.mu.Lock()
-		kv.rqst.isDone = false
 		kv.rqst.currentRqstIndex = -1
 		kv.rqst.mu.Unlock()
+		kv.chanFinished <- true
 	}()
 
-	kv.rqst.mu.Lock()
-	DPrintf("Waiting for server applied cmd.")
-	for !kv.rqst.isDone {
-		kv.rqst.cond.Wait()
+	if ok := <- kv.chanDone; ok {
+		reply.WrongLeader = false
+		reply.Err = OK
+		DPrintf("============Return OK.")
+		return
+	} else {
+		reply.WrongLeader = false
+		reply.Err = ErrTimeOut
+		return
 	}
-	kv.rqst.mu.Unlock()
+}
 
-	reply.WrongLeader = false
-	reply.Err = OK
-	DPrintf("============Return OK.")
-	return
+func (kv *KVServer) Apply(op Op) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	switch op.Operation {
+	case OperAppend:
+		if oldValue, ok := kv.keyValues[op.Key]; ok {
+			newValue := oldValue + op.Value
+			kv.keyValues[op.Key] = newValue
+			DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
+		} else {
+			panic(ok)
+		}
+	case OperPut:
+		kv.keyValues[op.Key] = op.Value
+		DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
+	}
+	kv.ack[op.Id] = op.ReqId
 }
 
 //
@@ -179,54 +216,74 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.keyValues = make(map[string]string)
-	kv.rqst = Rqst{currentRqstIndex: -1, isDone: false}
-	kv.rqst.cond = sync.NewCond(&kv.rqst.mu)
+	kv.rqst = Rqst{currentRqstIndex: -1}
+	kv.rqst.ch = make(chan bool)
+	kv.chanRqst = make(chan Op)
+	kv.chanDone = make(chan bool)
+	kv.chanFinished = make(chan bool)
+	kv.ack = make(map[int64]int)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	DPrintf("StartKVServer(%v).", me)
-
 	go func() {
 		for {
 			select {
 			case cmd := <- kv.applyCh:
-				kv.mu.Lock()
 				DPrintf("kv[%v] received msg from applyCh", kv.me)
 				if op, ok := (cmd.Command).(Op); ok {
-					switch op.Operation {
-					case OPER_GET:
-						DPrintf("kv[%v] received Get from applyCh.", kv.me)
-					case OPER_APPEND:
-						DPrintf("kv[%v] received Append from applyCh.", kv.me)
-						if oldValue, ok := kv.keyValues[op.Key]; ok {
-							newValue := oldValue + op.Value
-							kv.keyValues[op.Key] = newValue
-							DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
-						} else {
-							panic(ok)
-						}
-					case OPER_PUT:
-						DPrintf("kv[%v] received Put from applyCh.", kv.me)
-						kv.keyValues[op.Key] = op.Value
-						DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
+					if !kv.CheckDup(op) {
+						kv.Apply(op)
+						DPrintf("Fresh request.")
+					} else {
+						DPrintf("Duplicated request: %v.", op)
 					}
 
 					// determine whether the received msg is the reply of the request.
 					kv.rqst.mu.Lock()
-					if cmd.CommandIndex == kv.rqst.currentRqstIndex {
-						DPrintf("Finished msg")
-						kv.rqst.isDone = true
-						kv.rqst.cond.Signal()
+					if cmd.CommandIndex == kv.rqst.currentRqstIndex &&
+						op == kv.rqst.oper {
+							DPrintf("Finished msg")
+							kv.rqst.ch <- true
 					}
 					kv.rqst.mu.Unlock()
 
 				} else {
 					panic(ok)
 				}
-				kv.mu.Unlock()
 			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case oper := <- kv.chanRqst:
+				if index, _, isLeader := kv.rf.Start(oper); isLeader {
+					kv.rqst.mu.Lock()
+					kv.rqst.currentRqstIndex = index
+					kv.rqst.oper = oper
+					kv.rqst.mu.Unlock()
+
+					select {
+					case <- kv.rqst.ch:
+						kv.chanDone <- true
+						DPrintf("Done.")
+					case <- time.After(5 * time.Second):
+						kv.chanDone <- false
+						DPrintf("Timeout.")
+					}
+
+				} else {
+					//panic(isLeader)
+				}
+			}
+
+			DPrintf("Block until the request return.")
+			<- kv.chanFinished
+			DPrintf("Request has returned.")
+
 		}
 	}()
 

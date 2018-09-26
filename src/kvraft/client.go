@@ -12,11 +12,14 @@ const RQSTINTERVAL = 500 * time.Millisecond
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
+
 	// You will have to modify this struct.
-	mu		sync.Mutex
-	doneChan	chan bool
-	valueChan	chan string
-	isDone		bool
+	mu        sync.Mutex
+	doneChan  chan bool
+	valueChan chan string
+	isDone    bool
+	id        int64
+	rqstId    int
 }
 
 func nrand() int64 {
@@ -32,6 +35,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// You'll have to add code here.
 	ck.doneChan = make(chan bool)
 	ck.valueChan = make(chan string)
+	ck.id = nrand()
+	ck.rqstId = 0
 	return ck
 }
 
@@ -49,8 +54,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	DPrintf("==============ck's Get(key: %v)", key)
-	args := GetArgs{Key: key}
+	ck.rqstId++
+	args := GetArgs{Key: key, Id: ck.id, ReqId: ck.rqstId}
 	var wg sync.WaitGroup
 	num := len(ck.servers)
 	for i := range ck.servers {
@@ -59,18 +67,24 @@ func (ck *Clerk) Get(key string) string {
 			defer wg.Done()
 			for {
 				var reply GetReply
+				isDone := false
 				ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 				if ok {
 					if reply.Err == OK {
+						DPrintf("==========ck successfully get key(%v), value: %v.",
+							key, reply.Value)
+						isDone = true
+					} else if reply.Err == ErrTimeOut {
+						DPrintf("Error: %v", reply.Err)
+					}
+
+					if isDone {
+						// Tell other goroutine this request has been finished.
 						for j := 0; j < others; j++ {
 							ck.doneChan <- true
 						}
 						ck.valueChan <- reply.Value
-						DPrintf("==========ck successfully get key(%v), value: %v.",
-							key, reply.Value)
-						break
-					} else {
-						//DPrintf("Not OK.")
+						return
 					}
 				} else {
 					DPrintf("Failed to call.")
@@ -78,6 +92,7 @@ func (ck *Clerk) Get(key string) string {
 
 				select {
 				case <- ck.doneChan:
+					DPrintf("This request has been finished by other servers.")
 					return
 				case <- time.After(RQSTINTERVAL):
 					continue
@@ -86,7 +101,6 @@ func (ck *Clerk) Get(key string) string {
 		}(args, i, num)
 	}
 
-	// Note: This may receive signal from other operation.
 	<- ck.doneChan
 	value := <- ck.valueChan
 	DPrintf("=========ck get value(%v) from valueChan.", value)
@@ -108,12 +122,17 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	DPrintf("========ck's PutAppend(key: %v, value: %v, op: %v)==========.",
 		key, value, op)
+	ck.rqstId++
 	args := PutAppendArgs{
 		Key:	key,
 		Value:	value,
 		Op: 	op,
+		Id:		ck.id,
+		ReqId:	ck.rqstId,
 	}
 	var wg sync.WaitGroup
 	num := len(ck.servers)
@@ -123,16 +142,22 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			defer wg.Done()
 			for {
 				var reply PutAppendReply
+				isDone := false
 				ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 				if ok {
 					if reply.Err == OK {
+						DPrintf("=======ck's PutApppend got success.")
+						isDone = true
+					} else if reply.Err == ErrTimeOut {
+						DPrintf("Error: %v", reply.Err)
+					}
+
+					if isDone {
+						// Tell other goroutine this request has been finished.
 						for j := 0; j < others; j++ {
 							ck.doneChan <- true
 						}
-						DPrintf("=======ck's PutApppend got success from kv[%v].", i)
-						break
-					} else {
-						//DPrintf("Not OK.")
+						return
 					}
 				} else {
 					DPrintf("Failed to call.")
