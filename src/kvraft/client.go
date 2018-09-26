@@ -5,21 +5,16 @@ import "crypto/rand"
 import (
 	"math/big"
 	"sync"
-	"time"
 )
-
-const RQSTINTERVAL = 500 * time.Millisecond
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 
 	// You will have to modify this struct.
-	mu        sync.Mutex
-	doneChan  chan bool
-	valueChan chan string
-	isDone    bool
-	id        int64
-	rqstId    int
+	mu        	sync.Mutex
+	id        	int64
+	rqstId		int
+	leader		int
 }
 
 func nrand() int64 {
@@ -33,13 +28,41 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.doneChan = make(chan bool)
-	ck.valueChan = make(chan string)
 	ck.id = nrand()
 	ck.rqstId = 0
+	ck.leader = -1
 	return ck
 }
 
+func CallGet(server *labrpc.ClientEnd, args GetArgs) (bool, string) {
+	var reply GetReply
+	ok := server.Call("KVServer.Get", &args, &reply)
+	if ok && reply.WrongLeader == false {
+		DPrintf("=============Return from ck's Get.")
+		return true, reply.Value
+	} else {
+		return false, ""
+	}
+
+}
+
+func CallPutAppend(server *labrpc.ClientEnd, args PutAppendArgs) bool {
+	var reply PutAppendReply
+	ok := server.Call("KVServer.PutAppend", &args, &reply)
+	if ok && reply.WrongLeader == false {
+		DPrintf("=============Return from ck's PutAppend.")
+		return true
+	} else {
+		switch {
+		case ok == false:
+			DPrintf("ok is false.")
+		case reply.WrongLeader == true:
+			DPrintf("WrongLeader.")
+		}
+		return false
+	}
+
+}
 //
 // fetch the current value for a key.
 // returns "" if the key does not exist.
@@ -59,55 +82,22 @@ func (ck *Clerk) Get(key string) string {
 	DPrintf("==============ck's Get(key: %v)", key)
 	ck.rqstId++
 	args := GetArgs{Key: key, Id: ck.id, ReqId: ck.rqstId}
-	var wg sync.WaitGroup
-	num := len(ck.servers)
-	for i := range ck.servers {
-		wg.Add(1)
-		go func(args GetArgs, i int, others int) {
-			defer wg.Done()
-			for {
-				var reply GetReply
-				isDone := false
-				ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-				if ok {
-					if reply.Err == OK {
-						DPrintf("==========ck successfully get key(%v), value: %v.",
-							key, reply.Value)
-						isDone = true
-					} else if reply.Err == ErrTimeOut {
-						DPrintf("Error: %v", reply.Err)
-					}
 
-					if isDone {
-						// Tell other goroutine this request has been finished.
-						for j := 0; j < others; j++ {
-							ck.doneChan <- true
-						}
-						ck.valueChan <- reply.Value
-						return
-					}
-				} else {
-					DPrintf("Failed to call.")
-				}
-
-				select {
-				case <- ck.doneChan:
-					DPrintf("This request has been finished by other servers.")
-					return
-				case <- time.After(RQSTINTERVAL):
-					continue
-				}
-			}
-		}(args, i, num)
+	if ck.leader != -1 {
+		if ok, value := CallGet(ck.servers[ck.leader], args); ok {
+			return value
+		}
 	}
+	ck.leader = -1
 
-	<- ck.doneChan
-	value := <- ck.valueChan
-	DPrintf("=========ck get value(%v) from valueChan.", value)
-
-	wg.Wait()
-	DPrintf("=============Return from ck's Get.")
-	return value
+	for {
+		for i, server := range ck.servers {
+			if ok, value := CallGet(server, args); ok {
+				ck.leader = i
+				return value
+			}
+		}
+	}
 }
 
 //
@@ -134,50 +124,22 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Id:		ck.id,
 		ReqId:	ck.rqstId,
 	}
-	var wg sync.WaitGroup
-	num := len(ck.servers)
-	for i := range ck.servers {
-		wg.Add(1)
-		go func(args PutAppendArgs, i int, others int) {
-			defer wg.Done()
-			for {
-				var reply PutAppendReply
-				isDone := false
-				ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-				if ok {
-					if reply.Err == OK {
-						DPrintf("=======ck's PutApppend got success.")
-						isDone = true
-					} else if reply.Err == ErrTimeOut {
-						DPrintf("Error: %v", reply.Err)
-					}
 
-					if isDone {
-						// Tell other goroutine this request has been finished.
-						for j := 0; j < others; j++ {
-							ck.doneChan <- true
-						}
-						return
-					}
-				} else {
-					DPrintf("Failed to call.")
-				}
-
-				select {
-				case <- ck.doneChan:
-					DPrintf("This request has been finished by other servers.")
-					return
-				case <- time.After(RQSTINTERVAL):
-					continue
-				}
-			}
-		}(args, i, num)
+	if ck.leader != -1 {
+		if CallPutAppend(ck.servers[ck.leader], args) {
+			return
+		}
 	}
+	ck.leader = -1
 
-	<- ck.doneChan
-	wg.Wait()
-	DPrintf("=============Return from ck's PutAppend.")
-	return
+	for {
+		for i, server := range ck.servers {
+			if CallPutAppend(server, args) {
+				ck.leader = i
+				return
+			}
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
