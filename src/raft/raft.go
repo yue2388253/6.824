@@ -362,7 +362,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("Server %v received AppendEntry from %v.", rf.me, args.LeaderId)
+	//DPrintf("Server %v received AppendEntry from %v.", rf.me, args.LeaderId)
 
 	if args.Term < rf.currentTerm {
 		DPrintf("Server %v received AppendEntry. Leader %v is outdated. " +
