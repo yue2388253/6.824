@@ -38,7 +38,7 @@ func CallGet(server *labrpc.ClientEnd, args GetArgs) (bool, string) {
 	var reply GetReply
 	ok := server.Call("KVServer.Get", &args, &reply)
 	if ok && reply.WrongLeader == false {
-		DPrintf("=============Return from ck's Get.")
+		DPrintf("Successfully get value of key %v: %v.", args.Key, reply.Value)
 		return true, reply.Value
 	} else {
 		return false, ""
@@ -53,12 +53,12 @@ func CallPutAppend(server *labrpc.ClientEnd, args PutAppendArgs) bool {
 		DPrintf("=============Return from ck's PutAppend.")
 		return true
 	} else {
-		switch {
-		case ok == false:
-			DPrintf("ok is false.")
-		case reply.WrongLeader == true:
-			DPrintf("WrongLeader.")
-		}
+		//switch {
+		//case ok == false:
+		//	DPrintf("ok is false.")
+		//case reply.WrongLeader == true:
+		//	DPrintf("WrongLeader.")
+		//}
 		return false
 	}
 
@@ -79,7 +79,8 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
-	DPrintf("==============ck's Get(key: %v)", key)
+	DPrintf("ck's Get(key: %v)", key)
+	defer DPrintf("ck's Get finished(key: %v) .", key)
 	ck.rqstId++
 	args := GetArgs{Key: key, Id: ck.id, ReqId: ck.rqstId}
 
@@ -88,12 +89,14 @@ func (ck *Clerk) Get(key string) string {
 			return value
 		}
 	}
+	DPrintf("Cannot connect to the leader.")
 	ck.leader = -1
 
 	for {
 		for i, server := range ck.servers {
 			if ok, value := CallGet(server, args); ok {
 				ck.leader = i
+				DPrintf("Client finished request.")
 				return value
 			}
 		}
@@ -114,7 +117,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
-	DPrintf("========ck's PutAppend(key: %v, value: %v, op: %v)==========.",
+	DPrintf("ck's PutAppend(key: %v, value: %v, op: %v)",
+		key, value, op)
+	defer DPrintf("ck's PutAppend finished.(key: %v, value: %v, op: %v)",
 		key, value, op)
 	ck.rqstId++
 	args := PutAppendArgs{
@@ -130,6 +135,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			return
 		}
 	}
+	DPrintf("Cannot connect to the leader.")
 	ck.leader = -1
 
 	for {

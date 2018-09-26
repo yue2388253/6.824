@@ -30,11 +30,10 @@ type Op struct {
 }
 
 type Rqst struct {
-	mu					sync.Mutex
-	currentRqstIndex	int
-	oper 				Op
-	//isDone				bool
-	ch					chan bool
+	mu    sync.Mutex
+	index int
+	oper  Op
+	ch    chan bool
 }
 
 type KVServer struct {
@@ -97,7 +96,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	defer func() {
 		kv.rqst.mu.Lock()
-		kv.rqst.currentRqstIndex = -1
+		kv.rqst.index = -1
 		kv.rqst.mu.Unlock()
 		kv.chanFinished <- true
 	}()
@@ -144,7 +143,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	defer func() {
 		kv.rqst.mu.Lock()
-		kv.rqst.currentRqstIndex = -1
+		kv.rqst.index = -1
 		kv.rqst.mu.Unlock()
 		kv.chanFinished <- true
 	}()
@@ -155,7 +154,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("============Return OK.")
 		return
 	} else {
-		reply.WrongLeader = false
+		reply.WrongLeader = true
 		reply.Err = ErrTimeOut
 		return
 	}
@@ -216,7 +215,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.keyValues = make(map[string]string)
-	kv.rqst = Rqst{currentRqstIndex: -1}
+	kv.rqst = Rqst{index: -1}
 	kv.rqst.ch = make(chan bool)
 	kv.chanRqst = make(chan Op)
 	kv.chanDone = make(chan bool)
@@ -242,7 +241,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 					// determine whether the received msg is the reply of the request.
 					kv.rqst.mu.Lock()
-					if cmd.CommandIndex == kv.rqst.currentRqstIndex &&
+					if cmd.CommandIndex == kv.rqst.index &&
 						op == kv.rqst.oper {
 							DPrintf("Finished msg")
 							kv.rqst.ch <- true
@@ -261,8 +260,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			select {
 			case oper := <- kv.chanRqst:
 				if index, _, isLeader := kv.rf.Start(oper); isLeader {
+					DPrintf("Received rqst.")
 					kv.rqst.mu.Lock()
-					kv.rqst.currentRqstIndex = index
+					kv.rqst.index = index
 					kv.rqst.oper = oper
 					kv.rqst.mu.Unlock()
 
@@ -270,7 +270,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					case <- kv.rqst.ch:
 						kv.chanDone <- true
 						DPrintf("Done.")
-					case <- time.After(5 * time.Second):
+					case <- time.After(1 * time.Second):
 						kv.chanDone <- false
 						DPrintf("Timeout.")
 					}
