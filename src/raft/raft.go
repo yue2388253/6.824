@@ -517,18 +517,14 @@ func (rf *Raft) broadcastAppendEntries() {
 	for i := 0; i < len(rf.peers); i++ {
 		if rf.state == STATE_LEADER && i != rf.me {
 			var reply AppendEntryReply
-			prevLogIndex := rf.matchIndex[i]
+			prevLogIndex := min(rf.matchIndex[i], len(rf.log)-1)
 			args := AppendEntryArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  rf.log[prevLogIndex].Term,
 				LeaderCommit: rf.commitIndex,
-			}
-			if prevLogIndex >= len(rf.log) {
-				args.Entries = nil
-			} else {
-				args.Entries = rf.log[prevLogIndex+1:]
+				Entries:	  rf.log[prevLogIndex + 1:],
 			}
 			go func(server int, args AppendEntryArgs, reply AppendEntryReply) {
 				ok := rf.sendAppendEntry(server, &args, &reply)
