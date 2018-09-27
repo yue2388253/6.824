@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -99,6 +99,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.rqst.index = -1
 		kv.rqst.mu.Unlock()
 		kv.chanFinished <- true
+		DPrintf("kv[%v].Get finished.(args: %v)", kv.me, args)
 	}()
 
 	if ok := <- kv.chanDone; ok {
@@ -114,8 +115,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			return
 		}
 	} else {
-		reply.WrongLeader = false
-		reply.Err = ErrTimeOut
+		reply.WrongLeader = true
 		return
 	}
 }
@@ -152,7 +152,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	} else {
 		reply.WrongLeader = true
-		reply.Err = ErrTimeOut
 		return
 	}
 }
@@ -162,13 +161,8 @@ func (kv *KVServer) Apply(op Op) {
 	defer kv.mu.Unlock()
 	switch op.Operation {
 	case OperAppend:
-		if oldValue, ok := kv.keyValues[op.Key]; ok {
-			newValue := oldValue + op.Value
-			kv.keyValues[op.Key] = newValue
-			DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
-		} else {
-			panic(ok)
-		}
+		kv.keyValues[op.Key] += op.Value
+		DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
 	case OperPut:
 		kv.keyValues[op.Key] = op.Value
 		DPrintf("Now kv[%v]'s kvs is %v", kv.me, kv.keyValues)
@@ -277,6 +271,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				}
 			}
 
+			// Ensure that this server can only handle an operation at a time.
 			DPrintf("kv[%v] block until the request return.", kv.me)
 			<- kv.chanFinished
 			DPrintf("kv[%v] request has returned.", kv.me)
