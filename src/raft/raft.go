@@ -586,8 +586,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, logEntry)
 	rf.persist()
 	rf.matchIndex[rf.me] = len(rf.log) - 1
-	DPrintf("Leader %v received log from client.\n\t\t" +
-		"Now the log is %v.", rf.me, rf.log)
+	DPrintf("Leader %v received log(%v) from client.\n\t\t" +
+		"Now the log is %v.", rf.me, logEntry, rf.log)
 
 	return index, term, isLeader
 }

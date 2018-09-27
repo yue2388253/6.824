@@ -69,7 +69,7 @@ func (kv *KVServer) CheckDup(op Op) bool {
 
 func (kv *KVServer) AppendEntryToLog(oper Op) bool {
 	if _, leader := kv.rf.GetState(); leader {
-		DPrintf("============kv[%v] is the leader.", kv.me)
+		DPrintf("kv[%v] send oper(%v) to chanRqst.", kv.me, oper)
 		kv.chanRqst <- oper
 		return true
 	} else {
@@ -124,9 +124,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	DPrintf("kv[%v].PutAppend(args: %v)", kv.me, args)
 
-	reply.WrongLeader = true
-	reply.Err = ErrNoKey
-
 	oper := Op{
 		Operation:	args.Op,
 		Key:		args.Key,
@@ -137,7 +134,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	if !kv.AppendEntryToLog(oper) {
 		reply.WrongLeader = true
-		reply.Err = ErrNoKey
 		return
 	}
 
@@ -146,6 +142,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.rqst.index = -1
 		kv.rqst.mu.Unlock()
 		kv.chanFinished <- true
+		DPrintf("kv[%v].PutAppend finished.(args: %v)", kv.me, args)
 	}()
 
 	if ok := <- kv.chanDone; ok {
@@ -260,7 +257,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			select {
 			case oper := <- kv.chanRqst:
 				if index, _, isLeader := kv.rf.Start(oper); isLeader {
-					DPrintf("Received rqst.")
+					DPrintf("kv[%v] received rqst(%v).", kv.me, oper)
 					kv.rqst.mu.Lock()
 					kv.rqst.index = index
 					kv.rqst.oper = oper
@@ -269,20 +266,20 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					select {
 					case <- kv.rqst.ch:
 						kv.chanDone <- true
-						DPrintf("Done.")
+						DPrintf("kv[%v] done(Op: %v).", kv.me, oper)
 					case <- time.After(1 * time.Second):
 						kv.chanDone <- false
-						DPrintf("Timeout.")
+						DPrintf("kv[%v] timeout(Op: %v).", kv.me, oper)
 					}
 
 				} else {
-					//panic(isLeader)
+					kv.chanDone <- false
 				}
 			}
 
-			DPrintf("Block until the request return.")
+			DPrintf("kv[%v] block until the request return.", kv.me)
 			<- kv.chanFinished
-			DPrintf("Request has returned.")
+			DPrintf("kv[%v] request has returned.", kv.me)
 
 		}
 	}()

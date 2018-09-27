@@ -41,6 +41,9 @@ func CallGet(server *labrpc.ClientEnd, args GetArgs) (bool, string) {
 		DPrintf("Successfully get value of key %v: %v.", args.Key, reply.Value)
 		return true, reply.Value
 	} else {
+		if reply.Err == ErrTimeOut {
+			DPrintf("Get Timeout.(%v)", args)
+		}
 		return false, ""
 	}
 
@@ -53,12 +56,9 @@ func CallPutAppend(server *labrpc.ClientEnd, args PutAppendArgs) bool {
 		DPrintf("=============Return from ck's PutAppend.")
 		return true
 	} else {
-		//switch {
-		//case ok == false:
-		//	DPrintf("ok is false.")
-		//case reply.WrongLeader == true:
-		//	DPrintf("WrongLeader.")
-		//}
+		if reply.Err == ErrTimeOut {
+			DPrintf("PutAppend Timeout.(%v)", args)
+		}
 		return false
 	}
 
