@@ -52,6 +52,8 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+
+	Data		[]byte
 }
 
 type LogEntry struct {
@@ -87,7 +89,6 @@ type Raft struct {
 	voteNum			int
 	heartbeat		chan bool
 	becomeLeader	chan bool
-	becomeFollower	chan bool
 	becomeCandidate	chan bool
 	applyMsg		chan ApplyMsg
 	chanApply		chan bool
@@ -135,6 +136,10 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+func (rf *Raft) GetStateSize() int {
+	return len(rf.log)
+}
+
 func (rf *Raft) GetLastIndex() int {
 	return rf.log[len(rf.log) - 1].Index
 }
@@ -167,7 +172,6 @@ func (rf *Raft) persist() {
 	//DPrintf("SaveRaftState\tcurrentTerm:%v\tvotedFor:%v\tlog:%v",
 	//	rf.currentTerm, rf.votedFor, rf.log)
 }
-
 
 //
 // restore previously persisted state.
@@ -208,7 +212,159 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.me, rf.currentTerm, rf.votedFor, rf.log)
 }
 
+// return the index(in rf.log) of the log whose index is index.
+func (rf *Raft) nLog(n int) int{
+	for i, log := range rf.log {
+		if log.Index == n {
+			return i
+		}
+	}
+	return -1
+}
 
+// This func is called by kvserver to tell Raft to discard old log entries.
+func (rf *Raft) DiscardOldEntries(index int, isOutdated bool) (lastIncludedIndex, lastIncludedTerm int){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+
+	if n := rf.nLog(index); n >= 0 {
+		if !isOutdated {
+			// Cannot discard un-executed entries and un-committed entries.
+			if n > rf.commitIndex || n > rf.lastApplied {
+				panic("Cannot discard un-executed entries and un-commited entries")
+			}
+		}
+		lastIncludedIndex = rf.log[n].Index
+		lastIncludedTerm = rf.log[n].Term
+
+		rf.log = rf.log[n+1:]
+		return
+	} else {
+		DPrintf("No such index in rf[%v].log.", rf.me)
+		panic(nil)
+	}
+}
+
+type InstallSnapshotArgs struct {
+	Term		int
+	LeaderId	int
+	LastIncludedIndex	int
+	LastIncludedTerm	int
+	Data		[]byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) DoInstallSnapshot(data []byte) {
+	msg := ApplyMsg{CommandValid: false, Data: data}
+	rf.applyMsg <- msg
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	n := rf.nLog(args.LastIncludedIndex)
+	if n >= 0 {
+		if rf.log[n].Term == args.LastIncludedTerm {
+			DPrintf("The follower(rf[%v]) already has last included index/term.", rf.me)
+			return
+		} else {
+			DPrintf("rf[%v] received a InstallSnapshot but cannot find a match log.")
+			panic("strange")
+			return
+		}
+		//
+	}
+
+	// TODO: Do Snapshot.
+	rf.DiscardOldEntries(args.LastIncludedIndex, true)
+	rf.DoInstallSnapshot(args.Data)
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok && rf.state == STATE_LEADER {
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.persist()
+			rf.state = STATE_FOLLOWER
+			DPrintf("Leader %v received a higher term(%v) from server %v. " +
+				"Switch to be a follower", rf.me, reply.Term, server)
+		}
+
+		rf.nextIndex[server] = args.LastIncludedIndex + 1
+		rf.matchIndex[server] = args.LastIncludedIndex
+	}
+	return ok
+}
+
+func (rf *Raft) broadcastInstallSnapshot() {
+	DPrintf("Leader %v is broadcasting InstallSnapshot. Current term: %v.", rf.me, rf.currentTerm)
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		//state := rf.persister.ReadRaftState()
+		//r := bytes.NewBuffer(state)
+		//d := labgob.NewDecoder(r)
+		var args InstallSnapshotArgs
+		var reply InstallSnapshotReply
+		args.LastIncludedIndex = rf.log[rf.lastApplied].Index
+		args.LastIncludedTerm = rf.log[rf.lastApplied].Term
+		args.Term = rf.currentTerm
+		args.LeaderId = rf.me
+		args.Data = rf.persister.ReadSnapshot()
+
+		go func(server int, args InstallSnapshotArgs, reply InstallSnapshotReply) {
+			ok := rf.sendInstallSnapshot(server, &args, &reply)
+			if !ok {
+				DPrintf("Leader %v send InstallSnapshot failed.", rf.me)
+			}
+		}(i, args, reply)
+	}
+}
+
+func (rf *Raft) StartSnapshot(snapshot []byte, index int) {
+	baseIndex := rf.log[0].Index
+	lastIndex := rf.GetLastIndex()
+
+	if index <= baseIndex || index > lastIndex {
+		// in case haviing installed a snapshot from leader before snapshotting
+		// second condition is a hach
+		return
+	}
+
+	lastIncludedIdnex, lastIncludedTerm := rf.DiscardOldEntries(index, false)
+
+	state := rf.persister.ReadRaftState()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(lastIncludedIdnex)
+	e.Encode(lastIncludedTerm)
+	data := w.Bytes()
+	data = append(data, snapshot...)
+
+	rf.persister.SaveStateAndSnapshot(state, data)
+	if rf.state == STATE_LEADER {
+		rf.broadcastInstallSnapshot()
+	}
+}
 
 //
 // example RequestVote RPC arguments structure.
@@ -383,16 +539,16 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 	//}
 
 
-	if args.PrevLogIndex >= len(rf.log) {
+	if args.PrevLogIndex > rf.GetLastIndex() {
 		DPrintf("Follower %v received AppendEntry. PrevLogIndex > len(rf.log).", rf.me)
 		rf.heartbeat <- true
-		// TODO: This follower is outdated.
+		// TODO: This server is outdated. Should return a index that can help the leader to replay more quickly.
 		reply.Success = false
 		return
 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("Follower %v found a conflicting entry.", rf.me)
 		reply.Success = false
-		// TODO: reply.Term = ?
+		// TODO: return a index that help the server replay more quickly.
 		rf.log = rf.log[:args.PrevLogIndex]		// Delete the existing entry and all that follow it.
 		rf.persist()
 		return
@@ -431,21 +587,15 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 				// This Leader might be outdated. Switch to be a follower.
 				rf.currentTerm = reply.Term
 				rf.persist()
-				if rf.state == STATE_LEADER {
-					rf.state = STATE_FOLLOWER
-					DPrintf("Leader %v received a higher term(%v) from server %v. " +
+				rf.state = STATE_FOLLOWER
+				DPrintf("Leader %v received a higher term(%v) from server %v. " +
 						"Switch to be a follower", rf.me, reply.Term, server)
-				}
 			} else {
 				if reply.LastIndex > 0 && reply.LastIndex < args.PrevLogIndex {
 					rf.nextIndex[server] = reply.LastIndex
 				}
 			}
 		} else {
-			//if rf.commitIndex > rf.lastApplied {
-			//
-			//}
-
 			if len(args.Entries) != 0 {
 				// The follower has received the entries and appended them.
 				rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
@@ -581,7 +731,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.log = append(rf.log, logEntry)
 	rf.persist()
-	rf.matchIndex[rf.me] = len(rf.log) - 1
 	DPrintf("Leader %v received log(%v) from client.\n\t\t" +
 		"Now the log is %v.", rf.me, logEntry, rf.log)
 
@@ -625,7 +774,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = append(rf.log, LogEntry{Term: 0})
 	rf.heartbeat = make(chan bool, 100)
 	rf.becomeLeader = make(chan bool, 1)
-	rf.becomeFollower = make(chan bool, 1)
 	rf.becomeCandidate= make(chan bool, 1)
 	rf.chanApply = make(chan bool, 1)
 	rf.applyMsg = applyCh
@@ -659,7 +807,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.state = STATE_LEADER
 					rf.votedFor = -1
 					for i := range rf.nextIndex {
-						rf.nextIndex[i] = len(rf.log)
+						rf.nextIndex[i] = rf.GetLastIndex() + 1
 						rf.matchIndex[i] = 0
 					}
 					rf.mu.Unlock()
@@ -674,26 +822,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.state = STATE_FOLLOWER
 					rf.mu.Unlock()
 
-				case <- rf.becomeFollower:
-					// Hear a more higher term.
-					rf.mu.Lock()
-					rf.state = STATE_FOLLOWER
-					rf.mu.Unlock()
-
 				}
 
 			case STATE_LEADER:
-				select {
-				case <- rf.becomeFollower:
-					// Hear a higher term.
-					rf.mu.Lock()
-					rf.state = STATE_FOLLOWER
-					rf.mu.Unlock()
-
-				case <- time.After(HB_INTERVAL):
-					rf.broadcastAppendEntries()
-
-				}
+				time.Sleep(HB_INTERVAL)
+				rf.broadcastAppendEntries()
 			}
 		}
 	}()
@@ -709,7 +842,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.mu.Lock()
 				for _, commitEntry := range rf.log[rf.lastApplied + 1: rf.commitIndex + 1] {
 					DPrintf("Server %v send msg %v to applyMsg.", rf.me, commitEntry)
-					rf.applyMsg <- ApplyMsg{true, commitEntry.Content, commitEntry.Index}
+					msg := ApplyMsg{
+						CommandValid: true,
+						Command:		commitEntry.Content,
+						CommandIndex:	commitEntry.Index,
+					}
+					rf.applyMsg <- msg
 				}
 				rf.lastApplied = rf.commitIndex
 				DPrintf("Server %v update lastApplied, now is %v.", rf.me, rf.lastApplied)

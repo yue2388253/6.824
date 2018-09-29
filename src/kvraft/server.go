@@ -7,8 +7,10 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
 )
 
+const SnapshotInterval = 5 * time.Second
 const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -221,26 +223,47 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		for {
 			select {
 			case cmd := <- kv.applyCh:
-				DPrintf("kv[%v] received msg from applyCh", kv.me)
-				if op, ok := (cmd.Command).(Op); ok {
-					if !kv.CheckDup(op) {
-						kv.Apply(op)
-						DPrintf("Fresh request.")
-					} else {
-						DPrintf("Duplicated request: %v.", op)
-					}
+				switch cmd.CommandValid {
+				case true:
+					DPrintf("kv[%v] received msg from applyCh", kv.me)
+					if op, ok := (cmd.Command).(Op); ok {
+						if !kv.CheckDup(op) {
+							kv.Apply(op)
+							DPrintf("Fresh request.")
+						} else {
+							DPrintf("Duplicated request: %v.", op)
+						}
 
-					// determine whether the received msg is the reply of the request.
-					kv.rqst.mu.Lock()
-					if cmd.CommandIndex == kv.rqst.index &&
-						op == kv.rqst.oper {
+						// determine whether the received msg is the reply of the request.
+						kv.rqst.mu.Lock()
+						if cmd.CommandIndex == kv.rqst.index &&
+							op == kv.rqst.oper {
 							DPrintf("Finished msg")
 							kv.rqst.ch <- true
-					}
-					kv.rqst.mu.Unlock()
+						}
+						kv.rqst.mu.Unlock()
 
-				} else {
-					panic(ok)
+					} else {
+						panic(ok)
+					}
+
+					// Detects when the persisted raft state grows too large,
+					// and then hands a snapshot to Raft and tells Raft that
+					// it can discard old log entries.
+					if kv.maxraftstate != -1 {
+						if stateSize := kv.rf.GetStateSize(); stateSize > maxraftstate {
+							w := new(bytes.Buffer)
+							e := labgob.NewEncoder(w)
+							e.Encode(kv.keyValues)
+							e.Encode(kv.ack)
+							data := w.Bytes()
+							kv.rf.StartSnapshot(data, cmd.CommandIndex)
+						}
+					}
+
+				case false:
+					DPrintf("kv[%v] is outdated too much and now received a InstallSnapshot.", kv.me)
+					// TODO: do snapshot
 				}
 			}
 		}
@@ -267,6 +290,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					}
 
 				} else {
+					DPrintf("Kv[%v] is not the leader now.", kv.me)
 					kv.chanDone <- false
 				}
 			}
