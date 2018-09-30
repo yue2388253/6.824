@@ -251,7 +251,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 					// and then hands a snapshot to Raft and tells Raft that
 					// it can discard old log entries.
 					if kv.maxraftstate != -1 {
-						if stateSize := kv.rf.GetStateSize(); stateSize > maxraftstate {
+						if kv.rf.GetStateSize() > maxraftstate {
 							w := new(bytes.Buffer)
 							e := labgob.NewEncoder(w)
 							e.Encode(kv.keyValues)

@@ -148,6 +148,10 @@ func (rf *Raft) GetLastTerm() int {
 	return rf.log[len(rf.log) - 1].Term
 }
 
+func (rf *Raft) GetFirstIndex() int {
+	return rf.log[0].Index
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -238,7 +242,12 @@ func (rf *Raft) DiscardOldEntries(index int, isOutdated bool) (lastIncludedIndex
 		lastIncludedIndex = rf.log[n].Index
 		lastIncludedTerm = rf.log[n].Term
 
-		rf.log = rf.log[n+1:]
+		newLogEntry := LogEntry{Term: lastIncludedTerm, Index: lastIncludedIndex}
+		var newLog []LogEntry
+		newLog[0] = newLogEntry
+		newLog = append(newLog, rf.log[n + 1:]...)
+		rf.log = newLog
+
 		return
 	} else {
 		DPrintf("No such index in rf[%v].log.", rf.me)
@@ -361,9 +370,6 @@ func (rf *Raft) StartSnapshot(snapshot []byte, index int) {
 	data = append(data, snapshot...)
 
 	rf.persister.SaveStateAndSnapshot(state, data)
-	if rf.state == STATE_LEADER {
-		rf.broadcastInstallSnapshot()
-	}
 }
 
 //
@@ -514,6 +520,17 @@ func (rf *Raft) broadcastRequestVote() {
 	}
 }
 
+func (rf *Raft) indexTermN(n int) int {
+	for _, log := range rf.log {
+		if log.Term == n {
+			return log.Index
+		} else if log.Term > n {
+			return log.Index
+		}
+	}
+	return rf.GetLastIndex()
+}
+
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -529,26 +546,19 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply)  {
 		return
 	}
 
-	//if args.LeaderCommit < rf.commitIndex {
-	//	DPrintf("Server %v received AppendEntry. Leader %v is outdated. " +
-	//		"My commitIndex is %v while Leader's is %v.",
-	//		rf.me, args.LeaderId, rf.commitIndex, args.LeaderCommit)
-	//	reply.Success = false
-	//	reply.Term = rf.currentTerm
-	//	return
-	//}
-
-
 	if args.PrevLogIndex > rf.GetLastIndex() {
 		DPrintf("Follower %v received AppendEntry. PrevLogIndex > len(rf.log).", rf.me)
 		rf.heartbeat <- true
-		// TODO: This server is outdated. Should return a index that can help the leader to replay more quickly.
+		reply.Term = rf.GetLastTerm()
+		reply.LastIndex = rf.GetLastIndex()
 		reply.Success = false
 		return
 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("Follower %v found a conflicting entry.", rf.me)
 		reply.Success = false
-		// TODO: return a index that help the server replay more quickly.
+		rf.heartbeat <- true
+		reply.Term = args.PrevLogTerm
+		reply.LastIndex = rf.indexTermN(args.PrevLogTerm)
 		rf.log = rf.log[:args.PrevLogIndex]		// Delete the existing entry and all that follow it.
 		rf.persist()
 		return
@@ -796,7 +806,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				case <- rf.becomeCandidate:
 					// Received a AppendEntry whose commitIndex is lower than me.
 					rf.startNewElection()
-
 				}
 
 			case STATE_CANDIDATE:
